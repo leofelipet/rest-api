@@ -72,6 +72,8 @@ class PersonController extends Controller
                 
                 if ($field === 'emails.value') {
                     $query->whereJsonContains('emails', ['value' => $value]);
+                } elseif ($field === 'email') {
+                    $query->whereJsonContains('emails', ['value' => $value]);
                 } else {
                     $query->where($field, 'like', "%{$value}%");
                 }
