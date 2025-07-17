@@ -18,6 +18,7 @@ use Webkul\Lead\Repositories\SourceRepository;
 use Webkul\Lead\Repositories\StageRepository;
 use Webkul\Lead\Repositories\TypeRepository;
 use Webkul\RestApi\Http\Controllers\V1\Controller;
+use Webkul\Lead\Models\Lead;
 use Webkul\RestApi\Http\Request\MassDestroyRequest;
 use Webkul\RestApi\Http\Request\MassUpdateRequest;
 use Webkul\RestApi\Http\Resources\V1\Lead\LeadResource;
@@ -76,7 +77,7 @@ class LeadController extends Controller
 
         $data['status'] = 1;
 
-        if ($data['lead_pipeline_stage_id']) {
+        if (isset($data['lead_pipeline_stage_id']) && $data['lead_pipeline_stage_id']) {
             $stage = $this->stageRepository->findOrFail($data['lead_pipeline_stage_id']);
 
             $data['lead_pipeline_id'] = $stage->lead_pipeline_id;
@@ -113,7 +114,7 @@ class LeadController extends Controller
 
         $data = $request->all();
 
-        if ($data['lead_pipeline_stage_id']) {
+        if (isset($data['lead_pipeline_stage_id']) && $data['lead_pipeline_stage_id']) {
             $stage = $this->stageRepository->findOrFail($data['lead_pipeline_stage_id']);
 
             $data['lead_pipeline_id'] = $stage->lead_pipeline_id;
@@ -200,19 +201,71 @@ class LeadController extends Controller
      */
     public function search(): AnonymousResourceCollection
     {
-        if ($userIds = $this->getAuthorizedUserIds()) {
-            $results = $this->leadRepository
-                ->pushCriteria(app(RequestCriteria::class))
-                ->limit(request()->input('limit') ?? 10)
-                ->findWhereIn('user_id', $userIds);
-        } else {
-            $results = $this->leadRepository
-                ->pushCriteria(app(RequestCriteria::class))
-                ->limit(request()->input('limit') ?? 10)
-                ->all();
+        $query = Lead::query();
+        
+        // Get search parameters
+        $searchParams = request()->get('search', []);
+        
+        if (is_string($searchParams)) {
+            $searchParams = [$searchParams];
         }
-
-        return LeadResource::collection($results);
+        
+        foreach ($searchParams as $param) {
+            if (strpos($param, ':') !== false) {
+                [$field, $value] = explode(':', $param, 2);
+                
+                switch ($field) {
+                    case 'person.emails.value':
+                        $query->whereHas('person', function ($q) use ($value) {
+                            $q->whereJsonContains('emails', ['value' => $value]);
+                        });
+                        break;
+                        
+                    case 'stage.code':
+                        $query->whereHas('stage', function ($q) use ($value) {
+                            $q->where('code', $value);
+                        });
+                        break;
+                        
+                    case 'status':
+                        if ($value === 'open') {
+                            $query->whereHas('stage', function ($q) {
+                                $q->whereNotIn('code', ['won', 'lost']);
+                            });
+                        }
+                        break;
+                        
+                    default:
+                        $query->where($field, 'like', "%{$value}%");
+                        break;
+                }
+            } else {
+                $query->where(function ($q) use ($param) {
+                    $q->where('title', 'like', "%{$param}%")
+                      ->orWhere('description', 'like', "%{$param}%")
+                      ->orWhereHas('person', function ($personQuery) use ($param) {
+                          $personQuery->where('name', 'like', "%{$param}%");
+                      });
+                });
+            }
+        }
+        
+        // Apply user permissions
+        if ($userIds = $this->getAuthorizedUserIds()) {
+            $query->whereIn('user_id', $userIds);
+        }
+        
+        $perPage = request()->get('per_page', 15);
+        $leads = $query->with([
+            'person', 
+            'person.organization', 
+            'person.attribute_values',
+            'stage', 
+            'source', 
+            'type'
+        ])->paginate($perPage);
+        
+        return LeadResource::collection($leads);
     }
 
     /**
@@ -260,6 +313,7 @@ class LeadController extends Controller
                     'user',
                     'person',
                     'person.organization',
+                    'person.attribute_values',
                     'pipeline',
                     'pipeline.stages',
                     'stage',

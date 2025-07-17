@@ -7,6 +7,7 @@ use Illuminate\Http\Resources\Json\JsonResource;
 use Illuminate\Support\Facades\Event;
 use Prettus\Repository\Criteria\RequestCriteria;
 use Webkul\Admin\Http\Requests\AttributeForm;
+use Webkul\Contact\Models\Person;
 use Webkul\Contact\Repositories\PersonRepository;
 use Webkul\RestApi\Http\Controllers\V1\Controller;
 use Webkul\RestApi\Http\Request\MassDestroyRequest;
@@ -56,18 +57,40 @@ class PersonController extends Controller
      */
     public function search(): JsonResource
     {
-        if ($userIds = $this->getAuthorizedUserIds()) {
-            $persons = $this->personRepository
-                ->pushCriteria(app(RequestCriteria::class))
-                ->limit(request()->input('limit') ?? 10)
-                ->findWhereIn('user_id', $userIds);
-        } else {
-            $persons = $this->personRepository
-                ->pushCriteria(app(RequestCriteria::class))
-                ->limit(request()->input('limit') ?? 10)
-                ->all();
+        $query = Person::query();
+        
+        // Get search parameters
+        $searchParams = request()->get('search', []);
+        
+        if (is_string($searchParams)) {
+            $searchParams = [$searchParams];
         }
-
+        
+        foreach ($searchParams as $param) {
+            if (strpos($param, ':') !== false) {
+                [$field, $value] = explode(':', $param, 2);
+                
+                if ($field === 'emails.value') {
+                    $query->whereJsonContains('emails', ['value' => $value]);
+                } else {
+                    $query->where($field, 'like', "%{$value}%");
+                }
+            } else {
+                $query->where(function ($q) use ($param) {
+                    $q->where('name', 'like', "%{$param}%")
+                      ->orWhereJsonContains('emails', ['value' => $param]);
+                });
+            }
+        }
+        
+        // Apply user permissions
+        if ($userIds = $this->getAuthorizedUserIds()) {
+            $query->whereIn('user_id', $userIds);
+        }
+        
+        $perPage = request()->get('per_page', 15);
+        $persons = $query->with(['organization', 'attribute_values'])->paginate($perPage);
+        
         return PersonResource::collection($persons);
     }
 
@@ -76,8 +99,18 @@ class PersonController extends Controller
      *
      * @return \Illuminate\Http\Response
      */
-    public function store(AttributeForm $request)
+    public function store()
     {
+        $this->validate(request(), [
+            'name' => 'required',
+            'emails' => 'required|array',
+            'emails.*.value' => 'required|email',
+            'emails.*.label' => 'required',
+            'contact_numbers' => 'required|array',
+            'contact_numbers.*.value' => 'required',
+            'contact_numbers.*.label' => 'required',
+        ]);
+
         Event::dispatch('contacts.person.create.before');
 
         $person = $this->personRepository->create($this->sanitizeRequestedPersonData());
@@ -96,8 +129,18 @@ class PersonController extends Controller
      * @param  int  $id
      * @return \Illuminate\Http\Response
      */
-    public function update(AttributeForm $request, $id)
+    public function update($id)
     {
+        $this->validate(request(), [
+            'name' => 'required',
+            'emails' => 'required|array',
+            'emails.*.value' => 'required|email',
+            'emails.*.label' => 'required',
+            'contact_numbers' => 'required|array',
+            'contact_numbers.*.value' => 'required',
+            'contact_numbers.*.label' => 'required',
+        ]);
+
         Event::dispatch('contacts.person.update.before', $id);
 
         $person = $this->personRepository->update($this->sanitizeRequestedPersonData(), $id);
@@ -170,7 +213,20 @@ class PersonController extends Controller
     {
         $data = request()->all();
 
-        $data['contact_numbers'] = collect($data['contact_numbers'])->filter(fn ($number) => ! is_null($number['value']))->toArray();
+        // Ensure 'contact_numbers' exists and is an array before processing
+        if (! isset($data['contact_numbers'])) {
+            $data['contact_numbers'] = [];
+        }
+
+        // Existing contact_numbers processing...
+        if (isset($data['contact_numbers'])) {
+            $data['contact_numbers'] = collect($data['contact_numbers'])
+                ->filter(function ($contactNumber) {
+                    return ! is_null($contactNumber['value'] ?? null);
+                })
+                ->values()
+                ->toArray();
+        }
 
         return $data;
     }
