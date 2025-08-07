@@ -75,7 +75,11 @@ class PersonController extends Controller
                 } elseif ($field === 'email') {
                     $query->whereJsonContains('emails', ['value' => $value]);
                 } else {
-                    $query->where($field, 'like', "%{$value}%");
+                    // Only allow valid columns to be searched directly
+                    $allowedColumns = ['name', 'job_title'];
+                    if (in_array($field, $allowedColumns)) {
+                        $query->where($field, 'like', "%{$value}%");
+                    }
                 }
             } else {
                 $query->where(function ($q) use ($param) {
